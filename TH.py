@@ -1,3 +1,4 @@
+from os import stat
 from typing import *
 import math
 
@@ -73,11 +74,38 @@ def teleportBuilder(circuit:QuantumCircuit,state:Qubit)->QuantumCircuit:
     return circuit
 
 import time
+import re
 
-def autoSelectQCompute(filter:"list[str]",builder:circuitBuilder,states:list,maxQueuedJob:int = 10) -> IBMQBackend:
+class Reprinter(object):
+    def __init__(self) -> None:
+        self._text = ""
+    
+    def up(self,nbline):
+        for _ in range(nbline):
+            sys.stdout.write("\x1b[A")
+
+    def reprint(self,text):
+        self.clear()
+        self.print(text)
+
+        
+    def clear(self):
+        self.up(self._text.count("\n"))
+        sys.stdout.write(re.sub(r"[^\s]", " ", self._text))
+        self.up(self._text.count("\n"))
+        self._text = ""
+
+    def print(self,text):
+        print(text)
+        self._text += text + "\n"
+
+    def clearCache(self):
+        self._text = ""
+
+def autoSelectQComputer(filter:"list[str]",builder:circuitBuilder,states:list,maxQueuedJob:int = 10) -> IBMQBackend:
     provider=IBMQ.get_provider('ibm-q')
     simulator=Aer.get_backend('qasm_simulator')
-
+    printer = Reprinter()
     filter = filter.copy()
 
     for f in filter:
@@ -91,13 +119,32 @@ def autoSelectQCompute(filter:"list[str]",builder:circuitBuilder,states:list,max
 
     jobs = {s:{n:{"job":None,"expeResult":None,"status":None} for n in filter} for s in states}
 
+    slen = max([len(str(s)) for s in states])
+
+    filterLen = {f:min(len(f),11) for f in filter}
+
+    header = "|" + "state".center(slen," ") + "|"
+    delim = "+" + "-" * slen + "+"
+
+    for f in filter:
+        header += f.center(min(len(f)+2,11)," ") + "|"
+        delim += "-" * min(len(f)+2,11) + "+"
+
+    print(header)
+    print(delim)
+
     for s in states:
+
+        line = "|" + str(s).center(slen," ") + "|"
+
         builder.setState(s)
         circuit = QuantumCircuit(*builder.minCiruitsize)
+        circuit = builder(circuit)
         counts = execute(circuit,backend = simulator,shots=512).result().get_counts()
         jobs[s]["simResult"] = {k:counts[k] for k in counts}
 
         for f in filter:
+            line += "QUEUED".center(min(len(f)+2,11)," ") + "|"
             qcomputer = provider.get_backend(f)
             while (True):
                 joblim = qcomputer.job_limit()
@@ -105,25 +152,47 @@ def autoSelectQCompute(filter:"list[str]",builder:circuitBuilder,states:list,max
                     break
                 time.sleep(2)
             jobs[s][f]["job"] = execute(circuit,backend = qcomputer,shots=512)
+            
+        printer.print(line)
+    printer.print(delim)
         
     jobsLeft = len(states)*len(filter)
+    printer.print(f"Jobs Left : {jobsLeft}")
 
     while jobsLeft >0:
-        time.sleep(2)
+        time.sleep(10)
+        Gstatus = ""
+        eta = datetime.now()
         for s in states:
+            Gstatus += "|" + str(s).center(slen," ") + "|"
             for f in filter:
-                status = jobs[s][f]["jobs"].status()
+                status = jobs[s][f]["job"].status()
+                if status.name == "QUEUED" :
+                    queueInfo = jobs[s][f]['job'].queue_info()
+                    if eta.tzinfo == None:
+                        eta.replace(tzinfo=queueInfo.estimated_complete_time.tzinfo)
+                    if queueInfo.estimated_complete_time > eta:
+                        eta = queueInfo.estimated_complete_time
+                    Gstatus += f"{status.name}({jobs[s][f]['job'].queue_position()})".center(min(len(f)+2,11)," ") + "|"
+
+                else :
+                    Gstatus += status.name.center(min(len(f)+2,11)," ") + "|"
+
+                if jobs[s][f]["status"] != None :
+                    continue
+                
                 if (status.name in ['DONE', 'CANCELLED', 'ERROR']):
                     jobsLeft -= 1
-
-                    if status.name == 'ERROR':
-                        print(f"An error occured while processing state {s} on {f}")
                     
                     if status.name == 'DONE':
-                        counts = jobs[s][f]["jobs"].result().get_counts()
+                        counts = jobs[s][f]["job"].result().get_counts()
+                        
                         jobs[s][f]["expeResult"] = {k:counts[k] for k in counts}
 
                     jobs[s][f]["status"] = status.name
+            Gstatus += "\n"
+        Gstatus += delim + f"\nJobs Left : {jobsLeft} ETA : {eta - datetime.now()}"
+        printer.reprint(Gstatus)
 
     errors = {f:{"count":0,"tot":0} for f in filter}
 
@@ -137,7 +206,7 @@ def autoSelectQCompute(filter:"list[str]",builder:circuitBuilder,states:list,max
     back = None
     error = 2.0
 
-    for (k,v) in errors :
+    for (k,v) in errors.items() :
         e = float(v["count"])/v["tot"]
         if e<error:
             error = e
@@ -145,12 +214,31 @@ def autoSelectQCompute(filter:"list[str]",builder:circuitBuilder,states:list,max
     
     print(error)
     print(back)
-
     return provider.get_backend(back)
 
 
+from string import Formatter
 
+def prettyDelta(timed:timedelta) -> str:
+    s = int(timedelta.total_seconds())
+    m,s = divmod(s,60)
+    h,m = divmod(m,60)
+    d,h = divmod(h,24)
 
+    string = ""
+
+    if(d >0):
+        string += "{0:02}d".format(d)
+
+    if (h>0):
+        string += "{0:02}h".format(h)
+
+    if (m>0):
+        string += "{0:02}m".format(m)
+
+    if (s>0):
+        string += "{0:02}s".format(s)
+    return string
             
 
 
