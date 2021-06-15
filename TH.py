@@ -102,6 +102,10 @@ class Reprinter(object):
     def clearCache(self):
         self._text = ""
 
+def startJob(circuit):
+    job = {"job":None,"expeResult":None,"status":None}
+
+
 def autoSelectQComputer(filter:"list[str]",builder:circuitBuilder,states:list,maxQueuedJob:int = 10) -> IBMQBackend:
     provider=IBMQ.get_provider('ibm-q')
     simulator=Aer.get_backend('qasm_simulator')
