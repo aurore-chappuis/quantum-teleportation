@@ -36,7 +36,7 @@ class circuitBuilder(object):
 
 class Qubit(object):
     def __init__(self,c1:complex,c2:complex):
-        if not math.isclose((abs(c1)**2+abs(c2)**2, 1)):
+        if not math.isclose(abs(c1)**2+abs(c2)**2, 1):
             raise ValueError(f"Invalid Qubit state {c1}|0> + {c2}|1> sum of amplitudes-squared does not equal one. ")
         self.c1 = c1
         self.c2 = c2
@@ -102,9 +102,61 @@ class Reprinter(object):
     def clearCache(self):
         self._text = ""
 
-def startJob(circuit):
-    job = {"job":None,"expeResult":None,"status":None}
+def startJobs(circuit,qComputerFilter,statusLine="|"):
+    jobs = {n:{"job":None,"expeResult":None,"status":None} for n in qComputerFilter}
+    
+    for f in qComputerFilter:
+        statusLine += "QUEUED".center(max(len(f)+2,11)," ") + "|"
+        qcomputer = provider.get_backend(f)
+        while (True):
+            joblim = qcomputer.job_limit()
+            if joblim.maximum_jobs - joblim.active_jobs >=1:
+                break
+            time.sleep(2)
+        jobs[f]["job"] = execute(circuit,backend = qcomputer,shots=512)
+    
+    return jobs,statusLine
 
+def monitorJobs(jobsDict,header,delim,printer):
+    jobsLeft = 0
+    slen = 0
+    
+    for s in jobsDict.keys():
+        jobsLeft += len(jobsDict[s].keys())
+        slen = max(slen,len(str(s)))
+
+    while jobsLeft >0:
+        time.sleep(10)
+        Gstatus = header + "\n" + delim + "\n"
+        eta = datetime.now(pytz.UTC)
+        for s in jobsDict.keys():
+            Gstatus += "|" + str(s).center(slen," ") + "|"
+            for f in jobsDict[s].keys():
+                status = jobsDict[s][f]["job"].status()
+                if status.name == "QUEUED" :
+                    queueInfo = jobsDict[s][f]['job'].queue_info()
+                    if queueInfo != None and queueInfo.estimated_complete_time > eta:
+                        eta = queueInfo.estimated_complete_time
+                    Gstatus += f"{status.name}({jobsDict[s][f]['job'].queue_position()})".center(max(len(f)+2,11)," ") + "|"
+
+                else :
+                    Gstatus += status.name.center(max(len(f)+2,11)," ") + "|"
+
+                if jobsDict[s][f]["status"] != None :
+                    continue
+                
+                if (status.name in ['DONE', 'CANCELLED', 'ERROR']):
+                    jobsLeft -= 1
+                    
+                    if status.name == 'DONE':
+                        counts = jobsDict[s][f]["job"].result().get_counts()
+                        
+                        jobsDict[s][f]["expeResult"] = {k:counts[k] for k in counts}
+
+                jobsDict[s][f]["status"] = status.name
+            Gstatus += "\n"
+        Gstatus += delim + f"\nJobs Left : {jobsLeft} ETA : " + prettyDelta(eta - datetime.now(pytz.UTC))
+        printer.reprint(Gstatus)
 
 def autoSelectQComputer(filter:"list[str]",builder:circuitBuilder,states:list,maxQueuedJob:int = 10) -> IBMQBackend:
     provider=IBMQ.get_provider('ibm-q')
@@ -124,7 +176,7 @@ def autoSelectQComputer(filter:"list[str]",builder:circuitBuilder,states:list,ma
             print(f"[Warning] number of states is superior to the number of available jobs for the backend {f} autoselection may take longer than expected")
     
     # data holder
-    jobs = {s:{n:{"job":None,"expeResult":None,"status":None} for n in filter} for s in states}
+    jobs = {}
     
     # preparing fancy print
     slen = max([len(str(s)) for s in states])
@@ -157,18 +209,11 @@ def autoSelectQComputer(filter:"list[str]",builder:circuitBuilder,states:list,ma
         builder.setState(s)
         circuit = QuantumCircuit(*builder.minCiruitsize)
         circuit = builder(circuit)
+        
+        jobs[s],line = startJobs(circuit,filter,line)
+        
         counts = execute(circuit,backend = simulator,shots=512).result().get_counts()
         jobs[s]["simResult"] = {k:counts[k] for k in counts}
-
-        for f in filter:
-            line += "QUEUED".center(max(len(f)+2,11)," ") + "|"
-            qcomputer = provider.get_backend(f)
-            while (True):
-                joblim = qcomputer.job_limit()
-                if joblim.maximum_jobs - joblim.active_jobs >=1:
-                    break
-                time.sleep(2)
-            jobs[s][f]["job"] = execute(circuit,backend = qcomputer,shots=512)
             
         printer.print(line)
     printer.print(delim)
@@ -177,38 +222,7 @@ def autoSelectQComputer(filter:"list[str]",builder:circuitBuilder,states:list,ma
     printer.print(f"Jobs Left : {jobsLeft}")
     
     # waiting for all jobs to end and gathering data
-    while jobsLeft >0:
-        time.sleep(10)
-        Gstatus = header + "\n" + delim + "\n"
-        eta = datetime.now(pytz.UTC)
-        for s in states:
-            Gstatus += "|" + str(s).center(slen," ") + "|"
-            for f in filter:
-                status = jobs[s][f]["job"].status()
-                if status.name == "QUEUED" :
-                    queueInfo = jobs[s][f]['job'].queue_info()
-                    if queueInfo != None and queueInfo.estimated_complete_time > eta:
-                        eta = queueInfo.estimated_complete_time
-                    Gstatus += f"{status.name}({jobs[s][f]['job'].queue_position()})".center(max(len(f)+2,11)," ") + "|"
-
-                else :
-                    Gstatus += status.name.center(max(len(f)+2,11)," ") + "|"
-
-                if jobs[s][f]["status"] != None :
-                    continue
-                
-                if (status.name in ['DONE', 'CANCELLED', 'ERROR']):
-                    jobsLeft -= 1
-                    
-                    if status.name == 'DONE':
-                        counts = jobs[s][f]["job"].result().get_counts()
-                        
-                        jobs[s][f]["expeResult"] = {k:counts[k] for k in counts}
-
-                    jobs[s][f]["status"] = status.name
-            Gstatus += "\n"
-        Gstatus += delim + f"\nJobs Left : {jobsLeft} ETA : " + prettyDelta(eta - datetime.now(pytz.UTC))
-        printer.reprint(Gstatus)
+    monitorJobs(jobs,header,delim,printer)
 
     errors = {f:{"count":0,"tot":0} for f in filter}
     
@@ -232,8 +246,7 @@ def autoSelectQComputer(filter:"list[str]",builder:circuitBuilder,states:list,ma
                 back = k
     
     print(error)
-    print(back)
-    return provider.get_backend(back)
+    return back
 
 
 from string import Formatter
@@ -260,6 +273,9 @@ def prettyDelta(timed:timedelta) -> str:
     return string
             
 
+proco = ["ibmq_manila","ibmq_santiago","ibmq_athens","ibmq_belem","ibmq_quito","ibmqx2"]#,"ibmq_lima"
+
+qcomputer = autoSelectQComputer(proco, circuitBuilder((3,1),teleportBuilder,Qubit.QubitValidator,Qubit(0,1)), [Qubit(1,0),Qubit(0,1)] )
 
 
     
